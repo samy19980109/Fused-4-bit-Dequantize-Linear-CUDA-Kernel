@@ -15,6 +15,9 @@
 
 set -e
 
+# Fix CUDA library path for PyTorch
+export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/torch/lib:$LD_LIBRARY_PATH
+
 echo "========================================"
 echo "MoE Benchmark Setup for RunPod"
 echo "Optimized for RTX 5090 (Blackwell)"
@@ -75,17 +78,24 @@ if torch.cuda.is_available():
 # Build existing INT4 kernel
 echo ""
 echo "Building INT4 CUDA kernel..."
-cd /workspace/4-bit-CUDA-Kernel
+
+# Get current directory (where the script is being run from)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+cd "$PROJECT_DIR"
+
 python setup.py install
 
 # Verify kernel
 echo ""
 echo "Verifying INT4 kernel..."
+export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/torch/lib:$LD_LIBRARY_PATH
 python -c "import fused_quant_linear_cuda; print('INT4 kernel loaded successfully')"
 
 # Quick test
 echo ""
 echo "Running quick test..."
+export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/torch/lib:$LD_LIBRARY_PATH
 python benchmark/run_moe_benchmark.py --config mixtral --batch 4 --seq 256 --warmup 5 --iters 10
 
 echo ""
