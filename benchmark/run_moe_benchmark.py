@@ -7,16 +7,23 @@ Compares different implementations for Mixture-of-Experts inference:
 2. torch.bmm (padded batched matmul) - REFERENCE
 3. Triton Grouped GEMM (fused kernel) - OPTIMIZED
 4. INT4 Quantized MoE (memory-optimized) - QUANTIZED
+5. FP4 Quantized GEMM (RTX 5090 Blackwell only) - BLACKWELL OPTIMIZED
 
-Target: Show 2-4x speedup with fused kernels + 8x memory savings with INT4
+Target: Show 2-4x speedup with fused kernels + 8x memory savings with INT4/FP4
 
 Usage:
     python benchmark/run_moe_benchmark.py --config mixtral --batch 16
 
-For RunPod (RTX 4090):
+For RunPod (RTX 5090 Blackwell):
     1. Start pod with image: runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404
     2. pip install triton matplotlib
     3. python benchmark/run_moe_benchmark.py
+
+RTX 5090 Key Specs:
+    - 170 SMs (vs 128 on RTX 4090)
+    - 32 GB GDDR7 memory
+    - 5th Gen Tensor Cores with native FP4 support
+    - Blackwell architecture (compute capability 10.x+)
 """
 
 import argparse
@@ -75,6 +82,19 @@ try:
 except ImportError as e:
     INT4_AVAILABLE = False
     print(f"Warning: INT4 MoE not available: {e}")
+
+# Try to import FP4 module (Blackwell GPUs only - RTX 5090)
+try:
+    from benchmark.moe_grouped_gemm.grouped_gemm_fp4 import (
+        benchmark_fp4_grouped_gemm,
+        has_fp4_support,
+    )
+
+    FP4_AVAILABLE = True
+except ImportError as e:
+    FP4_AVAILABLE = False
+    has_fp4_support = lambda: False
+    print(f"Warning: FP4 GEMM not available: {e}")
 
 
 def run_single_benchmark(
@@ -217,6 +237,34 @@ def run_single_benchmark(
                 },
             )
         )
+
+    # 5. FP4 Quantized GEMM (RTX 5090 Blackwell only)
+    if FP4_AVAILABLE and has_fp4_support():
+        print("Running FP4 Quantized GEMM (Blackwell)...")
+        fp4_latency, fp4_tflops, fp4_memory = benchmark_fp4_grouped_gemm(
+            m_sizes,
+            k,
+            n,
+            device=device,
+            warmup_iters=warmup_iters,
+            bench_iters=bench_iters,
+        )
+
+        results.append(
+            BenchmarkResult(
+                name="FP4 Quantized (Blackwell)",
+                latency_ms=fp4_latency,
+                tflops=fp4_tflops,
+                memory_bytes=fp4_memory,
+                config={
+                    "batch_size": batch_size,
+                    "seq_len": seq_len,
+                    "total_tokens": total_tokens,
+                },
+            )
+        )
+    elif FP4_AVAILABLE and not has_fp4_support():
+        print("Skipping FP4 (requires Blackwell GPU - RTX 5090)")
 
     # Print results
     print_benchmark_table(results)

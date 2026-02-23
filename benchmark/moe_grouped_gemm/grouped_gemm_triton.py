@@ -9,7 +9,9 @@ Key Optimizations (based on PyTorch blog Aug 2025):
 2. Grouped Launch Ordering - Optimize L2 cache access patterns
 3. Handle variable expert sizes without padding
 
-For RTX 4090: 128 SMs, no TMA (that's Hopper-only)
+GPU Support:
+- RTX 5090 (Blackwell): 170 SMs, 5th Gen Tensor Cores with native FP4
+- RTX 4090 (Ada): 128 SMs, no TMA (that's Hopper-only)
 """
 
 import torch
@@ -27,11 +29,13 @@ except ImportError:
 
 
 if TRITON_AVAILABLE:
-    # Get number of SMs for the GPU (RTX 4090 = 128 SMs)
+    # Get number of SMs for the GPU
+    # RTX 5090 (Blackwell): 170 SMs
+    # RTX 4090 (Ada): 128 SMs
     def get_num_sms() -> int:
         if torch.cuda.is_available():
             return torch.cuda.get_device_properties(0).multi_processor_count
-        return 128  # Default for RTX 4090
+        return 170  # Default for RTX 5090
 
     NUM_SMS = get_num_sms()
 

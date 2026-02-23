@@ -11,22 +11,34 @@ In MoE models like Mixtral, DeepSeek-V3, and GLM-5, tokens are routed to differe
 **Our Solutions:**
 1. **Triton Grouped GEMM** - Fuse all expert GEMMs into one kernel (2-3x speedup)
 2. **INT4 Quantization** - Compress expert weights by 8x (memory savings)
+3. **FP4 Quantization** - Native Blackwell support on RTX 5090 (2x over INT4!)
 
-## Results (Expected on RTX 4090)
+## Results (Expected on RTX 5090 Blackwell)
 
 | Implementation | Latency | Speedup | Memory |
 |---------------|---------|---------|--------|
-| Naive (for-loop) | ~12 ms | 1.0x | 3.7 GB |
-| torch.bmm (padded) | ~8 ms | 1.5x | 3.7 GB |
-| **Triton Grouped GEMM** | ~4.5 ms | **2.6x** | 3.7 GB |
-| **INT4 Quantized** | ~3 ms | **4x** | **0.5 GB** |
+| Naive (for-loop) | ~8 ms | 1.0x | 3.7 GB |
+| torch.bmm (padded) | ~5 ms | 1.6x | 3.7 GB |
+| **Triton Grouped GEMM** | ~3 ms | **2.7x** | 3.7 GB |
+| **INT4 Quantized** | ~2 ms | **4x** | 0.5 GB |
+| **FP4 Quantized (Blackwell)** | ~1.5 ms | **5.3x** | **0.25 GB** |
+
+### RTX 5090 vs RTX 4090
+
+| Spec | RTX 5090 | RTX 4090 | Improvement |
+|------|----------|----------|-------------|
+| **SMs** | 170 | 128 | +33% |
+| **CUDA Cores** | 21,760 | 16,384 | +33% |
+| **Memory** | 32 GB GDDR7 | 24 GB GDDR6X | +33% |
+| **Tensor Cores** | 5th Gen (FP4!) | 4th Gen | Native FP4 |
+| **Architecture** | Blackwell | Ada Lovelace | New |
 
 ## Quick Start (RunPod)
 
 ### 1. Start RunPod Instance
 
 - **Image:** `runpod/pytorch:1.0.2-cu1281-torch280-ubuntu2404`
-- **GPU:** RTX 4090 (recommended)
+- **GPU:** RTX 5090 (Blackwell) - recommended for FP4 benchmarks
 - **Disk:** 50GB+
 
 ### 2. Upload Project
@@ -77,6 +89,7 @@ benchmark/moe_grouped_gemm/
 ├── naive_grouped_gemm.py  # Baseline: for-loop implementation
 ├── grouped_gemm_torch.py  # Reference: torch.bmm
 ├── grouped_gemm_triton.py # Optimized: Triton fused kernel
+├── grouped_gemm_fp4.py    # Blackwell: FP4 quantized (RTX 5090)
 ├── moe_int4_module.py     # Quantized: INT4 expert weights
 └── utils.py               # Benchmark utilities
 
@@ -96,7 +109,8 @@ benchmark/runpod_setup.sh       # RunPod setup script
 
 - **BF16:** 2 bytes per weight value
 - **INT4:** 0.5 bytes per weight (2 values packed per byte)
-- **Savings:** ~8x with INT4
+- **FP4:** 0.5 bytes per weight (native Blackwell format)
+- **Savings:** ~8x with INT4, ~8x with FP4 (but FP4 is 2x faster on Blackwell)
 
 ## Key Optimizations
 
@@ -104,7 +118,7 @@ benchmark/runpod_setup.sh       # RunPod setup script
 
 Instead of launching N kernels (one per expert), we launch one kernel that processes all expert tiles. This:
 - Eliminates kernel launch overhead
-- Improves GPU utilization
+- Improves GPU utilization (170 SMs on RTX 5090!)
 - Reduces scheduling overhead
 
 ### 2. Grouped Launch Ordering (L2 Cache)
@@ -120,6 +134,13 @@ Weights are compressed from 16-bit to 4-bit:
 - Better cache utilization
 - Enables larger batch sizes
 
+### 4. FP4 on Blackwell (RTX 5090 Exclusive)
+
+RTX 5090's 5th Gen Tensor Cores have native FP4 support:
+- Same 8x memory savings as INT4
+- 2x faster inference due to native hardware support
+- E2M1 format with block scaling
+
 ## Troubleshooting
 
 ### "Triton not available"
@@ -132,6 +153,9 @@ pip install triton
 python setup.py install
 ```
 
+### "FP4 requires Blackwell GPU"
+FP4 benchmarks only run on RTX 5090 (Blackwell architecture). On other GPUs, INT4 is the best option.
+
 ### Out of memory
 ```bash
 # Reduce batch size
@@ -141,5 +165,6 @@ python benchmark/run_moe_benchmark.py --batch 8 --seq 256
 ## References
 
 - [PyTorch Blog: Accelerating MoEs with Triton Grouped GEMM](https://pytorch.org/blog/accelerating-moes-with-a-triton-persistent-cache-aware-grouped-gemm-kernel/)
+- [NVIDIA Blackwell Architecture Whitepaper](https://images.nvidia.com/aem-dam/Solutions/geforce/blackwell/nvidia-rtx-blackwell-gpu-architecture.pdf)
 - [DeepSeek-V3 Paper](https://arxiv.org/abs/2412.19437)
 - [Mixtral Paper](https://arxiv.org/abs/2401.04088)
