@@ -92,11 +92,11 @@ echo "Verifying INT4 kernel..."
 export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/torch/lib:$LD_LIBRARY_PATH
 python -c "import fused_quant_linear_cuda; print('INT4 kernel loaded successfully')"
 
-# Fair benchmark - same weights for all methods
+# Honest benchmark - shows real value of quantization
 echo ""
-echo "Running fair benchmark (same weights for all)..."
+echo "Running honest benchmark..."
 export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/torch/lib:$LD_LIBRARY_PATH
-python benchmark/run_fair_benchmark.py
+python benchmark/run_honest_benchmark.py
 
 echo ""
 echo "========================================"
