@@ -228,7 +228,7 @@ def benchmark_moe_int4():
 
     # Benchmark naive (FP16 dequantize + matmul)
     print("\nBenchmarking naive (FP16)...")
-    inputs_fp16 = inputs.float()
+    inputs_fp16 = inputs.half()  # Convert to FP16 to match weights
 
     # Warmup
     for _ in range(10):
