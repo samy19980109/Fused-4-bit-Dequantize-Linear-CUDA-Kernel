@@ -21,7 +21,7 @@ def quantize_weights_moe(weights_list):
     Quantize a list of FP16 weight matrices to INT4.
 
     Args:
-        weights_list: List of [ffn_dim, hidden_dim] FP16 tensors
+        weights_list: List of [ffn_dim, hidden_dim] FP16 tensors (on CUDA)
 
     Returns:
         packed_weights: [num_experts, ffn_dim, packed_dim] uint8
@@ -33,32 +33,41 @@ def quantize_weights_moe(weights_list):
     hidden_dim = weights_list[0].shape[1]
     packed_dim = hidden_dim // 2
 
-    packed_weights = torch.zeros(num_experts, ffn_dim, packed_dim, dtype=torch.uint8)
-    scales = torch.zeros(num_experts, ffn_dim, dtype=torch.float32)
-    zero_points = torch.zeros(num_experts, ffn_dim, dtype=torch.float32)
+    device = weights_list[0].device
+
+    packed_weights = torch.zeros(
+        num_experts, ffn_dim, packed_dim, dtype=torch.uint8, device=device
+    )
+    scales = torch.zeros(num_experts, ffn_dim, dtype=torch.float32, device=device)
+    zero_points = torch.zeros(num_experts, ffn_dim, dtype=torch.float32, device=device)
 
     for e, w in enumerate(weights_list):
         w_fp32 = w.float()
         w_min = w_fp32.min()
         w_max = w_fp32.max()
 
-        scales[e] = (w_max - w_min) / 15.0
-        zero_points[e] = torch.round(-w_min / scales[e])
-        zero_points[e] = zero_points[e].clamp(0, 15)
+        scale = (w_max - w_min) / 15.0
+        zp = torch.round(-w_min / scale)
+        zp = zp.clamp(0, 15)
+
+        scales[e] = scale
+        zero_points[e] = zp
 
         w_quant = torch.clamp(
-            torch.round(w_fp32 / scales[e].unsqueeze(1) + zero_points[e].unsqueeze(1)),
-            0,
-            15,
+            torch.round(w_fp32 / scale.unsqueeze(1) + zp.unsqueeze(1)), 0, 15
         ).to(torch.uint8)
 
-        packed = torch.zeros(ffn_dim, packed_dim, dtype=torch.uint8)
+        packed = torch.zeros(ffn_dim, packed_dim, dtype=torch.uint8, device=device)
         for i in range(packed_dim):
-            w0 = w_quant[:, 2 * i]
+            w0 = (
+                w_quant[:, 2 * i]
+                if 2 * i < hidden_dim
+                else torch.zeros(ffn_dim, dtype=torch.uint8, device=device)
+            )
             w1 = (
                 w_quant[:, 2 * i + 1]
                 if 2 * i + 1 < hidden_dim
-                else torch.zeros(ffn_dim, dtype=torch.uint8)
+                else torch.zeros(ffn_dim, dtype=torch.uint8, device=device)
             )
             packed[:, i] = (w1 << 4) | w0
 
@@ -167,9 +176,7 @@ def benchmark_moe_int4():
     # Quantize
     print("Quantizing to INT4...")
     packed, scales, zp = quantize_weights_moe(weights)
-    packed = packed.cuda()
-    scales = scales.cuda()
-    zp = zp.cuda()
+    # Already on cuda from quantize_weights_moe
 
     # Memory comparison
     fp16_mem = sum(w.numel() * 2 for w in weights) / 1e6
