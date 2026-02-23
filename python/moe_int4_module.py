@@ -46,27 +46,31 @@ def quantize_weights_moe(weights_list):
         w_min = w_fp32.min()
         w_max = w_fp32.max()
 
-        scale = (w_max - w_min) / 15.0
-        zp = torch.round(-w_min / scale)
-        zp = zp.clamp(0, 15)
+        scale_val = ((w_max - w_min) / 15.0).item()
+        zp_val = round((-w_min / scale_val).item())
+        zp_val = max(0, min(15, zp_val))
 
-        scales[e] = scale
-        zero_points[e] = zp
+        scales[e] = scale_val
+        zero_points[e] = zp_val
 
-        w_quant = torch.clamp(
-            torch.round(w_fp32 / scale.unsqueeze(1) + zp.unsqueeze(1)), 0, 15
-        ).to(torch.uint8)
+        # Quantize
+        w_quant = torch.clamp(torch.round(w_fp32 / scale_val + zp_val), 0, 15).to(
+            torch.uint8
+        )
 
+        # Pack into INT4
         packed = torch.zeros(ffn_dim, packed_dim, dtype=torch.uint8, device=device)
         for i in range(packed_dim):
+            idx0 = 2 * i
+            idx1 = idx0 + 1
             w0 = (
-                w_quant[:, 2 * i]
-                if 2 * i < hidden_dim
+                w_quant[:, idx0]
+                if idx0 < hidden_dim
                 else torch.zeros(ffn_dim, dtype=torch.uint8, device=device)
             )
             w1 = (
-                w_quant[:, 2 * i + 1]
-                if 2 * i + 1 < hidden_dim
+                w_quant[:, idx1]
+                if idx1 < hidden_dim
                 else torch.zeros(ffn_dim, dtype=torch.uint8, device=device)
             )
             packed[:, i] = (w1 << 4) | w0
