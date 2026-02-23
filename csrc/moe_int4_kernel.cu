@@ -1,220 +1,103 @@
 /*
- * Fused MoE INT4 Grouped GEMM CUDA Kernel
+ * Simplified Fused MoE INT4 CUDA Kernel
  * 
- * This kernel computes multiple expert GEMMs in a single fused operation:
- * - Dequantizes INT4 weights on-the-fly in registers
- * - Performs matmul without materializing FP16 weights
- * - Handles variable-sized expert inputs (uneven token distribution)
- *
- * Key optimizations:
- * 1. Shared memory caching for input activations
- * 2. Vectorized uint4 loads for weights
- * 3. Fused dequantize + multiply-accumulate
- * 4. No padding needed - handles variable expert sizes
+ * Each block processes ONE expert - simpler and correct.
  */
 
 #include <torch/extension.h>
 #include <cuda.h>
 #include <cuda_runtime.h>
 
-// Kernel configuration
-constexpr int BLOCK_SIZE = 256;      // Threads per block
-constexpr int TILE_SIZE = 512;       // Input tile size
-constexpr int WARP_SIZE = 32;        // Threads per warp
+constexpr int BLOCK_SIZE = 256;
+constexpr int TILE_SIZE = 512;
 
 /*
- * Main fused MoE kernel
- * 
- * For each expert e:
- *   input_e: [M_e, K] - tokens assigned to this expert
- *   weight_e: [N, K] - expert weights (packed INT4)
- *   output_e: [M_e, N] - matmul result
- * 
- * We process all experts in one kernel launch.
+ * Each block handles ONE expert - processes all tokens for that expert
  */
-__global__ void moe_int4_fused_kernel(
-    // Packed weights for all experts: [num_experts, ffn_dim, packed_dim]
+__global__ void moe_int4_expert_kernel(
+    // Weights for this expert only: [ffn_dim, packed_dim]
     const uint8_t* __restrict__ packed_weights,
-    // Per-expert scales: [num_experts, ffn_dim]
-    const float* __restrict__ scales,
-    // Per-expert zero points: [num_experts, ffn_dim]  
-    const float* __restrict__ zero_points,
-    // Input activations: [total_tokens, hidden_dim]
-    const float* __restrict__ inputs,
-    // Expert assignment for each token: [total_tokens]
-    const int* __restrict__ expert_ids,
-    // Number of tokens assigned to each expert: [num_experts]
-    const int* __restrict__ tokens_per_expert,
-    // Cumulative offsets for each expert's input in the flat input array
-    const int* __restrict__ input_offsets,
-    // Output: [total_tokens, ffn_dim]
-    float* __restrict__ outputs,
-    // Model dimensions
-    int num_experts,
-    int hidden_dim,      // K
-    int ffn_dim,        // N
-    int packed_dim,     // K / 2
-    int total_tokens
-) {
-    // Shared memory for input activations
-    extern __shared__ float shared_mem[];
-    float* input_tile = shared_mem;
-    
-    // Each block handles one expert
-    const int expert_idx = blockIdx.x;
-    if (expert_idx >= num_experts) return;
-    
-    // Get this expert's parameters
-    const int num_tokens = tokens_per_expert[expert_idx];
-    if (num_tokens == 0) return;
-    
-    const int input_offset = input_offsets[expert_idx];
-    const int weight_offset = expert_idx * ffn_dim * packed_dim;
-    const int scale_offset = expert_idx * ffn_dim;
-    
-    // Each thread computes one output element (one row of output matrix)
-    const int out_col = threadIdx.x;
-    if (out_col >= ffn_dim) return;
-    
-    // Load scale and zero_point for this output column
-    const float scale = scales[scale_offset + out_col];
-    const float zero_point = zero_points[scale_offset + out_col];
-    
-    // Accumulator in registers
-    float accum = 0.0f;
-    
-    // Process input in tiles
-    for (int tile_start = 0; tile_start < hidden_dim; tile_start += TILE_SIZE) {
-        // Cooperative load into shared memory
-        const int tile_end = min(tile_start + TILE_SIZE, hidden_dim);
-        const int tile_size = tile_end - tile_start;
-        
-        // Each thread loads elements
-        for (int i = threadIdx.x; i < tile_size; i += BLOCK_SIZE) {
-            const int input_idx = input_offset + i;
-            input_tile[i] = inputs[input_idx];
-        }
-        __syncthreads();
-        
-        // Process this tile
-        // Load weights and dequantize on-the-fly
-        const int packed_col_start = tile_start / 2;
-        const int packed_col_end = (tile_end + 1) / 2;
-        
-        for (int pk = packed_col_start; pk < packed_col_end; pk++) {
-            // Load packed byte (contains 2 4-bit values)
-            const uint8_t packed_byte = packed_weights[weight_offset + out_col * packed_dim + pk];
-            
-            // Extract two 4-bit values
-            uint8_t w0 = packed_byte & 0x0F;        // Lower 4 bits
-            uint8_t w1 = (packed_byte >> 4) & 0x0F; // Upper 4 bits
-            
-            // Dequantize to FP32
-            float w0_fp = (float(w0) - zero_point) * scale;
-            float w1_fp = (float(w1) - zero_point) * scale;
-            
-            // Get input values
-            int i0 = tile_start + pk * 2;
-            int i1 = i0 + 1;
-            
-            float in0 = (i0 < hidden_dim) ? input_tile[pk * 2] : 0.0f;
-            float in1 = (i1 < hidden_dim) ? input_tile[pk * 2 + 1] : 0.0f;
-            
-            // Fused multiply-accumulate
-            accum += in0 * w0_fp;
-            if (i1 < hidden_dim) {
-                accum += in1 * w1_fp;
-            }
-        }
-        
-        __syncthreads();
-    }
-    
-    // Store result
-    // Each thread writes its assigned output column for all tokens in this expert
-    for (int token_idx = 0; token_idx < num_tokens; token_idx++) {
-        const int global_out_idx = (input_offset + token_idx) * ffn_dim + out_col;
-        outputs[global_out_idx] = accum;
-    }
-}
-
-/*
- * Simplified version: processes one expert at a time
- * Better for debugging and understanding the kernel
- */
-__global__ void moe_int4_single_expert_kernel(
-    const uint8_t* __restrict__ packed_weights,
+    // Scales for this expert: [ffn_dim]
     const float* __restrict__ scales,
     const float* __restrict__ zero_points,
+    // Inputs for this expert: [num_tokens, hidden_dim]
     const float* __restrict__ inputs,
+    // Output for this expert: [num_tokens, ffn_dim]
     float* __restrict__ outputs,
     int hidden_dim,
     int ffn_dim,
     int packed_dim,
-    int num_tokens,
-    int expert_idx
+    int num_tokens
 ) {
     extern __shared__ float shared_mem[];
     
+    // Each thread computes one output column (one element of the output vector)
     const int out_col = threadIdx.x;
     if (out_col >= ffn_dim) return;
     
-    const int weight_offset = expert_idx * ffn_dim * packed_dim;
-    const int scale_offset = expert_idx * ffn_dim;
+    // Load scale and zero_point for this column
+    const float scale = scales[out_col];
+    const float zero_point = zero_points[out_col];
     
-    const float scale = scales[scale_offset + out_col];
-    const float zero_point = zero_points[scale_offset + out_col];
-    
+    // Accumulator
     float accum = 0.0f;
     
-    // Process in tiles
+    // Process input in tiles
     for (int tile_start = 0; tile_start < hidden_dim; tile_start += TILE_SIZE) {
-        // Load input tile
+        // Cooperative load of input tile into shared memory
         for (int i = threadIdx.x; i < TILE_SIZE && (tile_start + i) < hidden_dim; i += BLOCK_SIZE) {
             shared_mem[i] = inputs[tile_start + i];
         }
         __syncthreads();
         
-        // Process tile
         const int tile_end = min(tile_start + TILE_SIZE, hidden_dim);
-        for (int pk = tile_start / 2; pk < (tile_end + 1) / 2; pk++) {
-            uint8_t packed_byte = packed_weights[weight_offset + out_col * packed_dim + pk];
+        const int tile_elements = tile_end - tile_start;
+        
+        // Process this tile - dequantize weights and multiply
+        for (int pk = 0; pk < (tile_elements + 1) / 2; pk++) {
+            // Load packed byte containing 2 4-bit values
+            const int weight_idx = out_col * packed_dim + (tile_start / 2) + pk;
+            const uint8_t packed_byte = packed_weights[weight_idx];
             
-            uint8_t w0 = packed_byte & 0x0F;
-            uint8_t w1 = (packed_byte >> 4) & 0x0F;
+            // Extract two 4-bit values
+            uint8_t w0_int = packed_byte & 0x0F;
+            uint8_t w1_int = (packed_byte >> 4) & 0x0F;
             
-            float w0_fp = (float(w0) - zero_point) * scale;
-            float w1_fp = (float(w1) - zero_point) * scale;
+            // Dequantize to float
+            float w0 = (float(w0_int) - zero_point) * scale;
+            float w1 = (float(w1_int) - zero_point) * scale;
             
+            // Get input values from shared memory
             int i0 = tile_start + pk * 2;
             int i1 = i0 + 1;
             
-            float in0 = shared_mem[pk * 2];
+            float in0 = (i0 < hidden_dim) ? shared_mem[pk * 2] : 0.0f;
             float in1 = (i1 < hidden_dim) ? shared_mem[pk * 2 + 1] : 0.0f;
             
-            accum += in0 * w0_fp;
+            // Fused multiply-accumulate
+            accum += in0 * w0;
             if (i1 < hidden_dim) {
-                accum += in1 * w1_fp;
+                accum += in1 * w1;
             }
         }
         __syncthreads();
     }
     
-    // Store output for all tokens
-    for (int t = 0; t < num_tokens; t++) {
-        outputs[t * ffn_dim + out_col] = accum;
+    // Store output for all tokens - each thread writes all rows for its column
+    for (int token = 0; token < num_tokens; token++) {
+        outputs[token * ffn_dim + out_col] = accum;
     }
 }
 
-// Python bindings
+// Python binding
 torch::Tensor moe_int4_forward(
     torch::Tensor packed_weights,    // [num_experts, ffn_dim, packed_dim] uint8
     torch::Tensor scales,            // [num_experts, ffn_dim] float
-    torch::Tensor zero_points,       // [num_experts, ffn_dim] float
-    torch::Tensor inputs,            // [total_tokens, hidden_dim] float
-    torch::Tensor expert_ids,       // [total_tokens] int
+    torch::Tensor zero_points,      // [num_experts, ffn_dim] float
+    torch::Tensor inputs,           // [total_tokens, hidden_dim] float
+    torch::Tensor expert_ids,       // [total_tokens] int (which expert each token goes to)
     torch::Tensor tokens_per_expert, // [num_experts] int
-    torch::Tensor input_offsets     // [num_experts] int
+    torch::Tensor input_offsets     // [num_experts] int (offset in inputs for each expert)
 ) {
     const int num_experts = packed_weights.size(0);
     const int ffn_dim = packed_weights.size(1);
@@ -222,39 +105,37 @@ torch::Tensor moe_int4_forward(
     const int hidden_dim = inputs.size(1);
     const int total_tokens = inputs.size(0);
     
-    // Output tensor
+    // Output
     auto outputs = torch::zeros({total_tokens, ffn_dim}, inputs.options());
     
-    // Launch one block per expert
-    const int blocks = num_experts;
-    const int threads = BLOCK_SIZE;
-    const int shared_mem = TILE_SIZE * sizeof(float);
-    
-    moe_int4_fused_kernel<<<blocks, threads, shared_mem>>>(
-        packed_weights.data_ptr<uint8_t>(),
-        scales.data_ptr<float>(),
-        zero_points.data_ptr<float>(),
-        inputs.data_ptr<float>(),
-        expert_ids.data_ptr<int>(),
-        tokens_per_expert.data_ptr<int>(),
-        input_offsets.data_ptr<int>(),
-        outputs.data_ptr<float>(),
-        num_experts,
-        hidden_dim,
-        ffn_dim,
-        packed_dim,
-        total_tokens
-    );
+    // For each expert, launch a kernel
+    for (int expert = 0; expert < num_experts; expert++) {
+        const int num_tokens = tokens_per_expert[expert].item<int>();
+        if (num_tokens == 0) continue;
+        
+        const int input_offset = input_offsets[expert].item<int>();
+        
+        // Get pointers for this expert
+        const uint8_t* w_ptr = packed_weights.data_ptr<uint8_t>() + expert * ffn_dim * packed_dim;
+        const float* s_ptr = scales.data_ptr<float>() + expert * ffn_dim;
+        const float* zp_ptr = zero_points.data_ptr<float>() + expert * ffn_dim;
+        const float* in_ptr = inputs.data_ptr<float>() + input_offset * hidden_dim;
+        float* out_ptr = outputs.data_ptr<float>() + input_offset * ffn_dim;
+        
+        const int threads = BLOCK_SIZE;
+        const int shared_mem = TILE_SIZE * sizeof(float);
+        
+        moe_int4_expert_kernel<<<1, threads, shared_mem>>>(
+            w_ptr, s_ptr, zp_ptr, in_ptr, out_ptr,
+            hidden_dim, ffn_dim, packed_dim, num_tokens
+        );
+    }
     
     cudaDeviceSynchronize();
     return outputs;
 }
 
-// Register the function
-TORCH_LIBRARY(moe_int4, m) {
-    m.def("forward(Tensor packed_weights, Tensor scales, Tensor zero_points, Tensor inputs, Tensor expert_ids, Tensor tokens_per_expert, Tensor input_offsets) -> Tensor");
-}
-
-TORCH_LIBRARY_IMPL(moe_int4, CUDA, m) {
-    m.impl("forward", &moe_int4_forward);
+PYBIND11_MODULE(moe_int4_cuda, m) {
+    m.def("forward", &moe_int4_forward,
+          "Fused MoE INT4 forward");
 }
