@@ -23,7 +23,7 @@ echo "========================================"
 # Check GPU
 echo ""
 echo "Checking GPU..."
-nvidia-smi --query-gpu=name,memory.total,multi_processor_count --format=csv,noheader
+nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 
 # Detect GPU type
 GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
@@ -62,8 +62,10 @@ import torch
 if torch.cuda.is_available():
     props = torch.cuda.get_device_properties(0)
     print(f'GPU: {props.name}')
-    print(f'SMs: {props.multi_processor_count}')
     print(f'Compute Capability: {props.major}.{props.minor}')
+    # Estimate SMs based on compute capability
+    sm_count = props.multi_processor_count if hasattr(props, 'multi_processor_count') else 'Unknown'
+    print(f'SMs: {sm_count}')
     if props.major >= 10:
         print('✓ Blackwell architecture detected - FP4 supported!')
     else:
