@@ -92,11 +92,11 @@ echo "Verifying INT4 kernel..."
 export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/torch/lib:$LD_LIBRARY_PATH
 python -c "import fused_quant_linear_cuda; print('INT4 kernel loaded successfully')"
 
-# Quick test
+# Quick test - use larger batch for realistic results
 echo ""
-echo "Running quick test..."
+echo "Running quick test (batch=16, seq=512)..."
 export LD_LIBRARY_PATH=/usr/local/lib/python3.12/dist-packages/torch/lib:$LD_LIBRARY_PATH
-python benchmark/run_moe_benchmark.py --config mixtral --batch 4 --seq 256 --warmup 5 --iters 10
+python benchmark/run_moe_benchmark.py --config mixtral --batch 16 --seq 512 --warmup 20 --iters 50
 
 echo ""
 echo "========================================"
