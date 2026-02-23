@@ -36,8 +36,7 @@ setup(
         CUDAExtension(
             name="moe_int4_cuda",
             sources=[
-                "csrc/moe_int4.cpp",
-                "csrc/moe_int4_kernel.cu",
+                "csrc/moe_int4_kernel.cu",  # Contains both kernel and bindings
             ],
             extra_compile_args={
                 "cxx": ["-O3"],
